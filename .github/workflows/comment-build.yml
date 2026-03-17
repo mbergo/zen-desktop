@@ -1,0 +1,87 @@
+name: Comment-triggered build (@build-z3n)
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  check-comment:
+    name: Parse build request
+    if: contains(github.event.comment.body, '@build-z3n')
+    runs-on: ubuntu-latest
+    outputs:
+      branch: ${{ steps.parse.outputs.branch }}
+    steps:
+      - name: Check user permission
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const { data: permLevel } = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              username: context.payload.comment.user.login,
+            });
+            const allowed = ['admin', 'write'];
+            if (!allowed.includes(permLevel.permission)) {
+              core.setFailed(`User @${context.payload.comment.user.login} does not have write access to trigger builds.`);
+              return;
+            }
+
+      - name: React to comment
+        uses: actions/github-script@v6
+        with:
+          script: |
+            await github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: context.payload.comment.id,
+              content: 'rocket',
+            });
+
+      - name: Parse build options from comment
+        id: parse
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          # Default: release = ultra-performant (full LTO, PGO, SIMD, all optimizations)
+          BRANCH="release"
+          if echo "$COMMENT_BODY" | grep -qi "twilight"; then
+            BRANCH="twilight"
+          fi
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Post build started comment
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const branch = '${{ steps.parse.outputs.branch }}';
+            const flags = branch === 'release'
+              ? '🚀 **Ultra-performant** (full LTO, PGO, SIMD, all optimizations)'
+              : '🌙 **Twilight** (thin LTO, standard optimizations)';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: [
+                `⚡ **Build triggered by @${context.payload.comment.user.login}**`,
+                '',
+                `Build configuration: ${flags}`,
+                '',
+                `[View workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+              ].join('\n'),
+            });
+
+  build:
+    needs: check-comment
+    uses: ./.github/workflows/build.yml
+    secrets: inherit
+    with:
+      create_release: false
+      update_version: false
+      update_branch: ${{ needs.check-comment.outputs.branch }}
+      use-sccache: false
